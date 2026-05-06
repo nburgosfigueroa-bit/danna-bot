@@ -1,7 +1,0 @@
-python-telegram-bot==22.7
-groq==0.4.2
-pandas==2.1.4
-openpyxl==3.11.0
-python-dotenv==1.0.0
-folium==0.14.0
-lxml==4.9.3
