@@ -81,13 +81,13 @@ async def respuesta_ia(mensaje: str) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nombre = update.effective_user.first_name
     await update.message.reply_text(
-        f"🌿 *¡Guau, bienvenido {nombre}!* 🐕\n\n"
-        f"Soy DANNA, tu asistente perruna de Zona 6 Maipú.\n"
-        f"Estoy lista para ayudarte con tus OTs y lo que necesites.\n\n"
-        f"¿En qué te puedo ayudar hoy? 🐾",
-        parse_mode="Markdown",
-        reply_markup=MENU_PRINCIPAL
-    )
+    f"🐾 *¡Guau guau, {nombre}!* 🌿\n\n"
+    f"¡Qué alegría verte por aquí! 🐕 ¿Cómo va tu día?\n\n"
+    f"Soy DANNA, lista para salir a jugar... digo, ¡a trabajar! 🦴\n"
+    f"¿En qué te puedo ayudar hoy? ¡Dime, dime! 🐾",
+    parse_mode="Markdown",
+    reply_markup=MENU_PRINCIPAL
+)
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
