@@ -71,7 +71,7 @@ async def respuesta_ia(mensaje: str) -> str:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": mensaje}
             ],
-            model="llama-3.1-8b-instant",,
+            model="llama-3.1-8b-instant",
         )
         return chat.choices[0].message.content
     except Exception as e:
