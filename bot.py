@@ -218,7 +218,7 @@ def generar_excel_bytes(ots):
 SYSTEM_PROMPT = """Eres DANNA, tu companera asistente virtual que te ayuda a planificar tareas, gestionar tu trabajo y hacer tu dia mas facil.
 PERSONALIDAD: Cada saludo es diferente y lleno de energia perruna. Respondes en UN solo mensaje corto y directo. Usas emojis perrunos ocasionalmente. Eres carinosa pero eficiente.
 EXPERTISE: Experta en areas verdes, parques, plazas y jardines. Conoces contratos municipales, OTs, multas UTM, dotacion de personal. Sabes de podas, riego, limpieza, juegos, infraestructura. Manejas hasta 228 trabajadores en Zona 6.
-CAPACIDADES EXTRA: Puedes contar el clima de Santiago si te lo piden. Cuentas chistes cortos y divertidos. Das animo cuando alguien esta cansado. Recuerdas conversaciones anteriores.
+CAPACIDADES EXTRA: Puedes contar el clima de Santiago si te lo piden. Cuentas chistes cortos y divertidos. Das animo cuando alguien esta cansado. Recuerdas conversaciones anteriores. El usuario es chileno, por lo que a veces transcribira audios con modismos (cachai, po, wea, al tiro), entiendelos y responde con naturalidad.
 REGLAS: Nunca escribas listas largas. Si no sabes algo, sugiere crear una OT. Siempre termina con energia positiva."""
 
 ESPERANDO_TIPO, ESPERANDO_SECTOR, ESPERANDO_DESCRIPCION, ESPERANDO_FOTO, ESPERANDO_SUGERENCIA = range(5)
@@ -440,6 +440,45 @@ async def mensaje_libre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     respuesta = await respuesta_ia(texto, telegram_id)
     await update.message.reply_text(respuesta, reply_markup=MENU_PRINCIPAL)
 
+async def recibir_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.chat.send_action("typing")
+    try:
+        # Descargar el archivo de audio de Telegram
+        file = await update.message.voice.get_file()
+        ruta_audio = f"audio_{update.effective_user.id}.ogg"
+        await file.download_to_drive(ruta_audio)
+        
+        # Enviar a Groq Whisper para transcribir
+        with open(ruta_audio, "rb") as audio_file:
+            transcription = groq_client.audio.transcriptions.create(
+                file=(ruta_audio, audio_file.read()),
+                model="whisper-large-v3-turbo",
+                response_format="text",
+                language="es"
+            )
+        
+        texto_transcrito = transcription
+        
+        # Borrar el archivo local
+        import os
+        if os.path.exists(ruta_audio):
+            os.remove(ruta_audio)
+        
+        if not texto_transcrito or texto_transcrito.strip() == "":
+            await update.message.reply_text("Guau... no alcancé a escuchar nada. ¿Puedes repetirlo? 🐾")
+            return
+            
+        # Pasar el texto al cerebro principal de Danna
+        telegram_id = str(update.effective_user.id)
+        respuesta = await respuesta_ia(texto_transcrito, telegram_id)
+        
+        # Responder
+        await update.message.reply_text(f"🎤 *(Escuché: {texto_transcrito})*\n\n{respuesta}", parse_mode="Markdown", reply_markup=MENU_PRINCIPAL)
+        
+    except Exception as e:
+        logger.error(f"Error procesando audio: {e}")
+        await update.message.reply_text("Uy, tuve un problema intentando escuchar tu nota de voz. ¡Ladridos de error! 🥺")
+
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Cancelado. 🐾", reply_markup=MENU_PRINCIPAL)
     return ConversationHandler.END
@@ -608,6 +647,7 @@ def main():
     
     app.add_handler(MessageHandler(filters.Regex("^📊 Mis Solicitudes$"), mis_solicitudes))
     app.add_handler(MessageHandler(filters.Regex("^📥 Exportar Excel$"), exportar_excel))
+    app.add_handler(MessageHandler(filters.VOICE, recibir_audio))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensaje_libre))
     logger.info("DANNA Bot activo con Excel desde Telegram!")
