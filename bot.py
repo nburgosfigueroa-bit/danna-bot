@@ -71,6 +71,30 @@ def autorizar_usuario_db(telegram_id):
     r = requests.patch(url, json=data, headers=SUPABASE_HEADERS)
     return r.status_code in [200, 204]
 
+def subir_a_supabase(file_path, file_name):
+    """Sube un archivo al bucket 'FOTOS DE DANNA' y devuelve la URL pública."""
+    try:
+        bucket_name = "FOTOS%20DE%20DANNA" # Nombre con espacio codificado
+        url = f"{SUPABASE_URL}/storage/v1/object/{bucket_name}/{file_name}"
+        
+        with open(file_path, "rb") as f:
+            headers = {
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "apikey": SUPABASE_KEY,
+                "Content-Type": "image/jpeg"
+            }
+            r = requests.post(url, data=f, headers=headers)
+            
+        if r.status_code in [200, 201]:
+            public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket_name}/{file_name}"
+            return public_url
+        else:
+            logger.error(f"Error subiendo a Storage: {r.text}")
+            return None
+    except Exception as e:
+        logger.error(f"Excepción en subir_a_supabase: {e}")
+        return None
+
 def obtener_moderacion(telegram_id):
     url = f"{SUPABASE_URL}/rest/v1/moderacion?telegram_id=eq.{telegram_id}&apikey={SUPABASE_KEY}"
     headers = {**SUPABASE_HEADERS, "Prefer": ""}
@@ -245,10 +269,10 @@ def generar_excel_bytes(ots):
     sub.alignment = Alignment(horizontal="center")
     ws.row_dimensions[2].height = 18
 
-    columnas = ["N", "OT", "Trabajador", "Tipo de Trabajo", "Sector", "Descripcion", "Estado", "Fecha"]
-    anchos   = [5,   18,   20,           18,                15,       35,             12,       16]
+    ws.append(["#", "OT", "Usuario", "Tipo", "Sector", "Descripción", "Estado", "Fecha", "Foto 📸"])
+    ancho_columnas = [5, 18, 20, 15, 20, 40, 15, 18, 12]
 
-    for i, (col, ancho) in enumerate(zip(columnas, anchos), start=1):
+    for i, (col, ancho) in enumerate(zip(["#", "OT", "Usuario", "Tipo", "Sector", "Descripción", "Estado", "Fecha", "Foto 📸"], ancho_columnas), start=1):
         c = ws.cell(row=3, column=i, value=col)
         c.font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor=COLOR_HEADER)
@@ -279,7 +303,19 @@ def generar_excel_bytes(ots):
                 bottom=Side(style="thin", color="DDDDDD"),
                 right=Side(style="thin", color="DDDDDD")
             )
-        ws.row_dimensions[fila].height = 18
+            
+        # Agregar Link de la Foto si existe
+        foto_url = ot.get("foto_url")
+        if foto_url:
+            col_foto = 9 # Columna I
+            cell_foto = ws.cell(row=fila, column=col_foto, value="👁️ Ver Foto")
+            cell_foto.hyperlink = foto_url
+            cell_foto.font = Font(color="0000FF", underline="single", size=10)
+            cell_foto.alignment = Alignment(horizontal="center", vertical="center")
+            cell_foto.fill = PatternFill("solid", fgColor=color_fila)
+            cell_foto.border = Border(bottom=Side(style="thin", color="DDDDDD"))
+
+        ws.row_dimensions[fila].height = 25
 
     fila_res = len(ots) + 5
     ws.merge_cells(f"A{fila_res}:H{fila_res}")
@@ -547,11 +583,29 @@ async def recibir_descripcion(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     return ESPERANDO_FOTO
 
-async def recibir_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    foto_url = None
+async def pedir_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.photo:
-        foto_url = f"telegram_file_{update.message.photo[-1].file_id}"
-    await finalizar_solicitud(update, context, foto_url)
+        # Descargar foto
+        foto = await update.message.photo[-1].get_file()
+        file_name = f"foto_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{update.effective_user.id}.jpg"
+        ruta_local = f"temp_{file_name}"
+        await foto.download_to_drive(ruta_local)
+        
+        # Subir a Supabase Storage
+        await update.message.reply_text("🐕 *¡Guau!* Subiendo evidencia a la nube... dame un segundo.")
+        public_url = subir_a_supabase(ruta_local, file_name)
+        
+        # Borrar local
+        if os.path.exists(ruta_local):
+            os.remove(ruta_local)
+            
+        if public_url:
+            await finalizar_solicitud(update, context, public_url)
+        else:
+            await update.message.reply_text("⚠️ No pude subir la foto a la nube, pero registraré la OT de todas formas.")
+            await finalizar_solicitud(update, context, None)
+    else:
+        await finalizar_solicitud(update, context, None)
     return ConversationHandler.END
 
 async def sin_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
