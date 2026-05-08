@@ -72,6 +72,14 @@ def obtener_todas_sugerencias():
         return r.json()
     return []
 
+def obtener_sugerencias_pendientes():
+    url = f"{SUPABASE_URL}/rest/v1/sugerencias_danna?estado=eq.pendiente&order=fecha_creacion.desc&apikey={SUPABASE_KEY}"
+    headers = {**SUPABASE_HEADERS, "Prefer": ""}
+    r = requests.get(url, headers=headers)
+    if r.status_code == 200:
+        return r.json()
+    return []
+
 def responder_sugerencia_db(sugerencia_id, respuesta):
     url = f"{SUPABASE_URL}/rest/v1/sugerencias_danna?id=eq.{sugerencia_id}&apikey={SUPABASE_KEY}"
     data = {"respuesta_admin": respuesta, "estado": "respondida"}
@@ -525,6 +533,42 @@ async def responder_sugerencia(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await update.message.reply_text("❌ Error al guardar respuesta en BD.")
 
+async def insights_sugerencias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🧠 *Guau!* Leyendo todas las sugerencias pendientes para armar mi reporte analítico. Dame unos segundos... 🐾", parse_mode="Markdown")
+    
+    pendientes = obtener_sugerencias_pendientes()
+    if not pendientes:
+        await update.message.reply_text("No hay sugerencias pendientes de análisis. ¡Mi bandeja está limpia! 🐕✨")
+        return
+    
+    # Preparar la lista de sugerencias para la IA
+    texto_sugerencias = ""
+    for s in pendientes:
+        texto_sugerencias += f"- ID {s['id']} ({s['nombre_usuario']}): {s['sugerencia']}\n"
+        
+    prompt_insights = (
+        "Actúa como Danna, la asistente virtual canina y gerente de operaciones experta en áreas verdes. "
+        "Lee las siguientes sugerencias de los usuarios y elabora un reporte ejecutivo breve pero directo para el administrador (Nicolás). "
+        "Agrupa las sugerencias en las siguientes categorías (si aplican):\n"
+        "1. ⚡ Quick Wins (Fáciles de implementar, alto impacto)\n"
+        "2. 🏗️ Proyectos a mediano plazo\n"
+        "3. 🗑️ Descartables o inviables.\n\n"
+        "Para cada categoría menciona el ID de la sugerencia y por qué opinas eso. Usa un tono ejecutivo pero con tus toques perrunos (guau, emojis). "
+        f"Aquí están las sugerencias pendientes:\n\n{texto_sugerencias}"
+    )
+    
+    try:
+        chat = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt_insights}],
+            model="llama-3.1-8b-instant",
+            temperature=0.7
+        )
+        reporte = chat.choices[0].message.content
+        await update.message.reply_text(f"📊 *REPORTE DE INSIGHTS DANNA*\n\n{reporte}", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error generando insights: {e}")
+        await update.message.reply_text("Uy, mi cerebro (Groq) falló al intentar procesar esto. Intenta de nuevo más tarde. 🥺")
+
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     conv = ConversationHandler(
@@ -557,6 +601,7 @@ def main():
     app.add_handler(CommandHandler("estado", cambiar_estado))
     app.add_handler(CommandHandler("excel_sugerencias", excel_sugerencias))
     app.add_handler(CommandHandler("responder", responder_sugerencia))
+    app.add_handler(CommandHandler("insights", insights_sugerencias))
     
     app.add_handler(conv)
     app.add_handler(conv_sugerencia)
