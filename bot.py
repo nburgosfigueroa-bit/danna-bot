@@ -641,6 +641,7 @@ async def recibir_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if await check_moderacion_text("", telegram_id, update): # Check si ya está baneado antes de procesar audio
+        return
         
     await update.message.chat.send_action("typing")
     try:
