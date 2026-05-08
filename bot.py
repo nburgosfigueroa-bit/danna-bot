@@ -2,6 +2,7 @@ import os
 import logging
 import requests
 import io
+import re
 from dotenv import load_dotenv
 from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
@@ -26,12 +27,65 @@ logger = logging.getLogger(__name__)
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
+ADMIN_ID = "7570909402"
+PALABRAS_PROHIBIDAS = ["conchetumadre", "ctm", "culiao", "qlo", "puta", "maricon", "maricón", "mierda", "aweonao", "chucha", "perra", "puto", "csm"]
+
 SUPABASE_HEADERS = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
     "Content-Type": "application/json",
     "Prefer": "return=minimal"
 }
+
+def obtener_moderacion(telegram_id):
+    url = f"{SUPABASE_URL}/rest/v1/moderacion?telegram_id=eq.{telegram_id}&apikey={SUPABASE_KEY}"
+    headers = {**SUPABASE_HEADERS, "Prefer": ""}
+    r = requests.get(url, headers=headers)
+    if r.status_code == 200 and r.json():
+        return r.json()[0]
+    return None
+
+def registrar_advertencia(telegram_id, advertencias, baneado=False):
+    url = f"{SUPABASE_URL}/rest/v1/moderacion?apikey={SUPABASE_KEY}"
+    data = {
+        "telegram_id": telegram_id,
+        "advertencias": advertencias,
+        "baneado": baneado,
+        "fecha_ultimo_incidente": datetime.now().isoformat()
+    }
+    headers = {**SUPABASE_HEADERS, "Prefer": "resolution=merge-duplicates"}
+    r = requests.post(url, json=data, headers=headers)
+    return r.status_code in [200, 201, 204]
+
+async def check_moderacion_text(texto: str, telegram_id: str, update: Update) -> bool:
+    if telegram_id == ADMIN_ID:
+        return False
+        
+    mod = obtener_moderacion(telegram_id)
+    if mod and mod.get("baneado"):
+        await update.effective_message.reply_text("🚫 *Tarjeta Roja.*\nEstás baneado del sistema por uso de lenguaje inapropiado. Contacta al administrador.", parse_mode="Markdown")
+        return True
+        
+    if not texto:
+        return False
+
+    texto_lower = texto.lower()
+    contiene_groseria = any(re.search(rf'\b{p}\b', texto_lower) for p in PALABRAS_PROHIBIDAS)
+    
+    if contiene_groseria:
+        advs = mod.get("advertencias", 0) if mod else 0
+        nuevas_advs = advs + 1
+        
+        if nuevas_advs == 1:
+            registrar_advertencia(telegram_id, 1, False)
+            await update.effective_message.reply_text("🟨 *Tarjeta Amarilla*\nPor favor modera tu lenguaje. Si repites el uso de improperios serás bloqueado del sistema.", parse_mode="Markdown")
+            return True
+        else:
+            registrar_advertencia(telegram_id, nuevas_advs, True)
+            await update.effective_message.reply_text("🟥 *Tarjeta Roja*\nHas sido bloqueado del sistema por uso repetido de improperios. Contacta al administrador.", parse_mode="Markdown")
+            return True
+            
+    return False
 
 def insertar_solicitud(solicitud):
     url = f"{SUPABASE_URL}/rest/v1/solicitudes?apikey={SUPABASE_KEY}"
@@ -252,6 +306,8 @@ async def respuesta_ia(mensaje: str, telegram_id: str) -> str:
         return "Guau! Tuve un problemita, intenta de nuevo."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await check_moderacion_text("", str(update.effective_user.id), update):
+        return
     nombre = update.effective_user.first_name
     await update.message.reply_text(
         f"🐾 *Guau guau, {nombre}!* 🌿\n\n"
@@ -436,11 +492,19 @@ async def mis_solicitudes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def mensaje_libre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
     telegram_id = str(update.effective_user.id)
+    
+    if await check_moderacion_text(texto, telegram_id, update):
+        return
+        
     await update.message.chat.send_action("typing")
     respuesta = await respuesta_ia(texto, telegram_id)
     await update.message.reply_text(respuesta, reply_markup=MENU_PRINCIPAL)
 
 async def recibir_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    telegram_id = str(update.effective_user.id)
+    if await check_moderacion_text("", telegram_id, update): # Check si ya está baneado antes de procesar audio
+        return
+        
     await update.message.chat.send_action("typing")
     try:
         # Descargar el archivo de audio de Telegram
@@ -468,8 +532,11 @@ async def recibir_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Guau... no alcancé a escuchar nada. ¿Puedes repetirlo? 🐾")
             return
             
+        # Verificar moderación sobre el texto transcrito
+        if await check_moderacion_text(texto_transcrito, telegram_id, update):
+            return
+            
         # Pasar el texto al cerebro principal de Danna
-        telegram_id = str(update.effective_user.id)
         respuesta = await respuesta_ia(texto_transcrito, telegram_id)
         
         # Responder
@@ -608,6 +675,22 @@ async def insights_sugerencias(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"Error generando insights: {e}")
         await update.message.reply_text("Uy, mi cerebro (Groq) falló al intentar procesar esto. Intenta de nuevo más tarde. 🥺")
 
+async def desbanear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != ADMIN_ID:
+        await update.message.reply_text("No tienes permisos para usar este comando. 🐾")
+        return
+        
+    if len(context.args) < 1:
+        await update.message.reply_text("Uso: /desbanear <telegram_id>")
+        return
+        
+    objetivo_id = context.args[0]
+    # Registrar 0 advertencias y false en baneado
+    if registrar_advertencia(objetivo_id, 0, False):
+        await update.message.reply_text(f"✅ Usuario {objetivo_id} desbaneado con éxito.")
+    else:
+        await update.message.reply_text("❌ Error al desbanear al usuario en BD.")
+
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     conv = ConversationHandler(
@@ -641,6 +724,7 @@ def main():
     app.add_handler(CommandHandler("excel_sugerencias", excel_sugerencias))
     app.add_handler(CommandHandler("responder", responder_sugerencia))
     app.add_handler(CommandHandler("insights", insights_sugerencias))
+    app.add_handler(CommandHandler("desbanear", desbanear))
     
     app.add_handler(conv)
     app.add_handler(conv_sugerencia)
