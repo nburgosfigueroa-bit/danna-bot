@@ -37,6 +37,40 @@ SUPABASE_HEADERS = {
     "Prefer": "return=minimal"
 }
 
+def validar_rut(rut):
+    rut = rut.replace(".", "").replace("-", "").upper()
+    if not re.match(r"^\d{7,8}[0-9K]$", rut):
+        return False
+    aux = rut[:-1]
+    dv = rut[-1:]
+    res = 0
+    for i, d in enumerate(reversed(aux)):
+        res += int(d) * (i % 6 + 2)
+    v = 11 - (res % 11)
+    if v == 11: v = "0"
+    elif v == 10: v = "K"
+    else: v = str(v)
+    return v == dv
+
+def obtener_usuario(telegram_id):
+    url = f"{SUPABASE_URL}/rest/v1/usuarios_danna?telegram_id=eq.{telegram_id}&apikey={SUPABASE_KEY}"
+    headers = {**SUPABASE_HEADERS, "Prefer": ""}
+    r = requests.get(url, headers=headers)
+    if r.status_code == 200 and r.json():
+        return r.json()[0]
+    return None
+
+def insertar_usuario(data):
+    url = f"{SUPABASE_URL}/rest/v1/usuarios_danna?apikey={SUPABASE_KEY}"
+    r = requests.post(url, json=data, headers=SUPABASE_HEADERS)
+    return r.status_code in [200, 201]
+
+def autorizar_usuario_db(telegram_id):
+    url = f"{SUPABASE_URL}/rest/v1/usuarios_danna?telegram_id=eq.{telegram_id}&apikey={SUPABASE_KEY}"
+    data = {"autorizado": True}
+    r = requests.patch(url, json=data, headers=SUPABASE_HEADERS)
+    return r.status_code in [200, 204]
+
 def obtener_moderacion(telegram_id):
     url = f"{SUPABASE_URL}/rest/v1/moderacion?telegram_id=eq.{telegram_id}&apikey={SUPABASE_KEY}"
     headers = {**SUPABASE_HEADERS, "Prefer": ""}
@@ -276,6 +310,7 @@ CAPACIDADES EXTRA: Puedes contar el clima de Santiago si te lo piden. Cuentas ch
 REGLAS: Nunca escribas listas largas. Si no sabes algo, sugiere crear una OT. Siempre termina con energia positiva."""
 
 ESPERANDO_TIPO, ESPERANDO_SECTOR, ESPERANDO_DESCRIPCION, ESPERANDO_FOTO, ESPERANDO_SUGERENCIA = range(5)
+REG_NOMBRE, REG_CARGO, REG_RUT, REG_EMAIL = range(10, 14)
 
 TIPOS_TRABAJO = [
     "🌳 Poda", "💧 Riego", "🗑️ Limpieza",
@@ -306,9 +341,22 @@ async def respuesta_ia(mensaje: str, telegram_id: str) -> str:
         return "Guau! Tuve un problemita, intenta de nuevo."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_moderacion_text("", str(update.effective_user.id), update):
+    user_id = str(update.effective_user.id)
+    if await check_moderacion_text("", user_id, update):
         return
-    nombre = update.effective_user.first_name
+    
+    usuario = obtener_usuario(user_id)
+    if not usuario:
+        # Iniciar registro automático
+        await update.message.reply_text("🐾 *¡Guau!* Veo que eres nuevo por aquí. Soy DANNA, tu asistente virtual.\n\nPara poder ayudarte, primero necesito registrar tu perfil.")
+        await update.message.reply_text("¿Cuál es tu *nombre completo*?", parse_mode="Markdown")
+        return REG_NOMBRE
+    
+    if not usuario.get("autorizado") and user_id != ADMIN_ID:
+        await update.message.reply_text("⌛ *¡Paciencia!* Tus datos ya fueron enviados a Nicolás para su aprobación. Te avisaré apenas me den el 'visto bueno' 🐾")
+        return ConversationHandler.END
+
+    nombre = usuario.get("nombre", update.effective_user.first_name)
     await update.message.reply_text(
         f"🐾 *Guau guau, {nombre}!* 🌿\n\n"
         f"Que alegria verte por aqui! 🐕 Como va tu dia?\n\n"
@@ -317,6 +365,66 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=MENU_PRINCIPAL
     )
+    return ConversationHandler.END
+
+# --- FLUJO DE REGISTRO ---
+async def reg_nombre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["reg_nombre"] = update.message.text
+    await update.message.reply_text("Perfecto. ¿Cuál es tu *cargo*?", parse_mode="Markdown")
+    return REG_CARGO
+
+async def reg_cargo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["reg_cargo"] = update.message.text
+    await update.message.reply_text("Entendido. Ahora dime tu *RUT* (con guion y dígito verificador):", parse_mode="Markdown")
+    return REG_RUT
+
+async def reg_rut(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rut = update.message.text
+    if not validar_rut(rut):
+        await update.message.reply_text("❌ *RUT inválido.* Por favor escríbelo correctamente (ej: 12345678-9):", parse_mode="Markdown")
+        return REG_RUT
+    context.user_data["reg_rut"] = rut
+    await update.message.reply_text("¡Casi listo! ¿Cuál es tu *correo electrónico*?", parse_mode="Markdown")
+    return REG_EMAIL
+
+async def reg_finalizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    email = update.message.text
+    user = update.effective_user
+    datos = context.user_data
+    
+    # Guardar en BD
+    nuevo_usuario = {
+        "telegram_id": str(user.id),
+        "nombre": datos["reg_nombre"],
+        "cargo": datos["reg_cargo"],
+        "rut": datos["reg_rut"],
+        "email": email,
+        "autorizado": False
+    }
+    
+    if insertar_usuario(nuevo_usuario):
+        await update.message.reply_text("✅ *¡Registro completado!*\n\nHe enviado tus datos a Nicolás para su aprobación. Te avisaré cuando esté todo listo para empezar a trabajar. 🐾", parse_mode="Markdown")
+        
+        # Notificar al Admin
+        teclado = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Aprobar", callback_data=f"auth_yes_{user.id}"),
+            InlineKeyboardButton("❌ Rechazar", callback_data=f"auth_no_{user.id}")
+        ]])
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"🔔 *Nuevo Registro de Usuario*\n\n"
+                 f"👤 Nombre: {datos['reg_nombre']}\n"
+                 f"💼 Cargo: {datos['reg_cargo']}\n"
+                 f"🆔 RUT: {datos['reg_rut']}\n"
+                 f"📧 Email: {email}\n"
+                 f"ID: `{user.id}`\n\n¿Deseas autorizarlo?",
+            parse_mode="Markdown",
+            reply_markup=teclado
+        )
+    else:
+        await update.message.reply_text("❌ Error al guardar tus datos. Por favor intenta /start de nuevo.")
+    
+    return ConversationHandler.END
 
 async def pedir_sugerencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -493,6 +601,15 @@ async def mensaje_libre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
     telegram_id = str(update.effective_user.id)
     
+    # Verificar acceso primero
+    usuario = obtener_usuario(telegram_id)
+    if not usuario and telegram_id != ADMIN_ID:
+        await update.message.reply_text("🐾 No te conozco aún. Por favor usa /start para registrarte.")
+        return
+    if usuario and not usuario.get("autorizado") and telegram_id != ADMIN_ID:
+        await update.message.reply_text("⌛ Aún estoy esperando que Nicolás autorice tu cuenta. 🐾")
+        return
+
     if await check_moderacion_text(texto, telegram_id, update):
         return
         
@@ -502,8 +619,14 @@ async def mensaje_libre(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def recibir_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telegram_id = str(update.effective_user.id)
-    if await check_moderacion_text("", telegram_id, update): # Check si ya está baneado antes de procesar audio
+    
+    # Verificar acceso
+    usuario = obtener_usuario(telegram_id)
+    if (not usuario or not usuario.get("autorizado")) and telegram_id != ADMIN_ID:
+        await update.message.reply_text("🚫 No tienes acceso para enviar audios aún. Regístrate o espera autorización.")
         return
+
+    if await check_moderacion_text("", telegram_id, update): # Check si ya está baneado antes de procesar audio
         
     await update.message.chat.send_action("typing")
     try:
@@ -553,6 +676,20 @@ async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    if query.data.startswith("auth_"):
+        partes = query.data.split("_")
+        accion = partes[1]
+        objetivo_id = partes[2]
+        if accion == "yes":
+            autorizar_usuario_db(objetivo_id)
+            await query.edit_message_text(f"✅ Usuario {objetivo_id} autorizado.")
+            await context.bot.send_message(chat_id=objetivo_id, text="🎉 *¡Buenas noticias!* Nicolás ha autorizado tu perfil. Ya puedes usar a DANNA al 100%. ¡Bienvenido! 🐕🐾", parse_mode="Markdown", reply_markup=MENU_PRINCIPAL)
+        else:
+            await query.edit_message_text(f"❌ Usuario {objetivo_id} rechazado.")
+            await context.bot.send_message(chat_id=objetivo_id, text="😔 Lo siento, tu acceso ha sido rechazado por el administrador.")
+        return
+
     if query.data == "exportar_excel":
         await query.message.reply_text("🐕 Preparando tu Excel... dame un segundo!")
         ots = obtener_todas_ots()
@@ -725,6 +862,19 @@ def main():
     app.add_handler(CommandHandler("responder", responder_sugerencia))
     app.add_handler(CommandHandler("insights", insights_sugerencias))
     app.add_handler(CommandHandler("desbanear", desbanear))
+    
+    # Flujo de Registro
+    conv_registro = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            REG_NOMBRE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_nombre)],
+            REG_CARGO: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_cargo)],
+            REG_RUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_rut)],
+            REG_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_finalizar)],
+        },
+        fallbacks=[CommandHandler("cancelar", cancelar)],
+    )
+    app.add_handler(conv_registro)
     
     app.add_handler(conv)
     app.add_handler(conv_sugerencia)
