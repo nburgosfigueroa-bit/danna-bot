@@ -72,9 +72,9 @@ def autorizar_usuario_db(telegram_id):
     return r.status_code in [200, 204]
 
 def subir_a_supabase(file_path, file_name):
-    """Sube un archivo al bucket 'fotos' y devuelve la URL pública."""
+    """Sube un archivo al bucket 'FOTOS DE DANNA' y devuelve la URL pública."""
     try:
-        bucket_name = "fotos" 
+        bucket_name = "FOTOS%20DE%20DANNA" 
         url = f"{SUPABASE_URL}/storage/v1/object/{bucket_name}/{file_name}"
         
         with open(file_path, "rb") as f:
