@@ -59,6 +59,33 @@ def guardar_mensaje(telegram_id, role, content):
     data = {"telegram_id": telegram_id, "role": role, "content": content}
     requests.post(url, json=data, headers=SUPABASE_HEADERS)
 
+def insertar_sugerencia(sugerencia):
+    url = f"{SUPABASE_URL}/rest/v1/sugerencias_danna?apikey={SUPABASE_KEY}"
+    r = requests.post(url, json=sugerencia, headers=SUPABASE_HEADERS)
+    return r.status_code in [200, 201]
+
+def obtener_todas_sugerencias():
+    url = f"{SUPABASE_URL}/rest/v1/sugerencias_danna?order=fecha_creacion.desc&apikey={SUPABASE_KEY}"
+    headers = {**SUPABASE_HEADERS, "Prefer": ""}
+    r = requests.get(url, headers=headers)
+    if r.status_code == 200:
+        return r.json()
+    return []
+
+def responder_sugerencia_db(sugerencia_id, respuesta):
+    url = f"{SUPABASE_URL}/rest/v1/sugerencias_danna?id=eq.{sugerencia_id}&apikey={SUPABASE_KEY}"
+    data = {"respuesta_admin": respuesta, "estado": "respondida"}
+    r = requests.patch(url, json=data, headers=SUPABASE_HEADERS)
+    return r.status_code in [200, 204]
+
+def obtener_sugerencia_por_id(sugerencia_id):
+    url = f"{SUPABASE_URL}/rest/v1/sugerencias_danna?id=eq.{sugerencia_id}&apikey={SUPABASE_KEY}"
+    headers = {**SUPABASE_HEADERS, "Prefer": ""}
+    r = requests.get(url, headers=headers)
+    if r.status_code == 200 and r.json():
+        return r.json()[0]
+    return None
+
 def obtener_historial(telegram_id):
     url = f"{SUPABASE_URL}/rest/v1/memoria_conversaciones?telegram_id=eq.{telegram_id}&order=fecha.desc&limit=10&apikey={SUPABASE_KEY}"
     headers = {**SUPABASE_HEADERS, "Prefer": ""}
@@ -67,6 +94,30 @@ def obtener_historial(telegram_id):
         mensajes = r.json()
         return list(reversed([{"role": m["role"], "content": m["content"]} for m in mensajes]))
     return []
+
+def generar_excel_sugerencias_bytes(sugs):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sugerencias"
+    
+    ws.append(["ID", "Usuario", "Sugerencia", "Respuesta Admin", "Estado", "Fecha"])
+    for i in range(1, 7):
+        ws.cell(row=1, column=i).font = Font(bold=True)
+    
+    for s in sugs:
+        ws.append([
+            s.get("id", ""),
+            s.get("nombre_usuario", ""),
+            s.get("sugerencia", ""),
+            s.get("respuesta_admin", ""),
+            s.get("estado", ""),
+            s.get("fecha_creacion", "")[:16]
+        ])
+    
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 def generar_excel_bytes(ots):
     COLOR_HEADER     = "1B5E20"
@@ -162,7 +213,7 @@ EXPERTISE: Experta en areas verdes, parques, plazas y jardines. Conoces contrato
 CAPACIDADES EXTRA: Puedes contar el clima de Santiago si te lo piden. Cuentas chistes cortos y divertidos. Das animo cuando alguien esta cansado. Recuerdas conversaciones anteriores.
 REGLAS: Nunca escribas listas largas. Si no sabes algo, sugiere crear una OT. Siempre termina con energia positiva."""
 
-ESPERANDO_TIPO, ESPERANDO_SECTOR, ESPERANDO_DESCRIPCION, ESPERANDO_FOTO = range(4)
+ESPERANDO_TIPO, ESPERANDO_SECTOR, ESPERANDO_DESCRIPCION, ESPERANDO_FOTO, ESPERANDO_SUGERENCIA = range(5)
 
 TIPOS_TRABAJO = [
     "🌳 Poda", "💧 Riego", "🗑️ Limpieza",
@@ -171,7 +222,7 @@ TIPOS_TRABAJO = [
 
 MENU_PRINCIPAL = ReplyKeyboardMarkup(
     [["📋 Nueva Solicitud", "📊 Mis Solicitudes"],
-     ["❓ Ayuda"]],
+     ["💡 Sugerencias y Ayuda"]],
     resize_keyboard=True
 )
 
@@ -203,16 +254,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=MENU_PRINCIPAL
     )
 
-async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def pedir_sugerencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📖 *Como usar DANNA:*\n\n"
-        "1. Toca *Nueva Solicitud* para crear una OT\n"
-        "2. Toca *Exportar Excel* para descargar todas las OTs\n"
-        "3. O simplemente *escribeme* lo que necesitas 🐕\n\n"
-        "Preguntame lo que quieras! 🌿",
+        "🐾 *¡Guau! Tengo una duda...*\n\n"
+        "Me encanta aprender cosas nuevas. ¿Tienes alguna idea o sugerencia para que yo pueda ayudarte mejor en tu trabajo?\n\n"
+        "Escríbela aquí abajo (o escribe *Cancelar* si no se te ocurre nada ahora):",
         parse_mode="Markdown",
-        reply_markup=MENU_PRINCIPAL
+        reply_markup=ReplyKeyboardMarkup([["❌ Cancelar"]], resize_keyboard=True)
     )
+    return ESPERANDO_SUGERENCIA
+
+async def recibir_sugerencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = update.message.text
+    if texto == "❌ Cancelar" or texto.lower() == "cancelar":
+        await update.message.reply_text("Entendido. ¡Sigamos trabajando! 🐾", reply_markup=MENU_PRINCIPAL)
+        return ConversationHandler.END
+    
+    usuario = update.effective_user
+    sugerencia_obj = {
+        "telegram_id": str(usuario.id),
+        "nombre_usuario": f"{usuario.first_name} {usuario.last_name or ''}".strip(),
+        "sugerencia": texto,
+        "estado": "pendiente",
+        "fecha_creacion": datetime.now().isoformat()
+    }
+    
+    ok = insertar_sugerencia(sugerencia_obj)
+    if ok:
+        await update.message.reply_text(
+            "🦴 *¡Mmmmm, qué rica idea!* \n\n"
+            "La guardé en mi memoria especial. Mi administrador la leerá pronto y me enseñará cómo hacerlo. ¡Gracias por ayudarme a mejorar! 🐕✨",
+            parse_mode="Markdown",
+            reply_markup=MENU_PRINCIPAL
+        )
+    else:
+        await update.message.reply_text("Ay, no pude guardar tu idea. Asegúrate de que la tabla `sugerencias_danna` esté creada en Supabase. 🥺", reply_markup=MENU_PRINCIPAL)
+    
+    return ConversationHandler.END
 
 async def exportar_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mensaje_espera = await update.message.reply_text("🐕 Preparando tu Excel... dame un segundo!")
@@ -397,6 +475,56 @@ async def cambiar_estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ Error al actualizar estado de `{ot}`", parse_mode="Markdown")
 
+async def excel_sugerencias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sugs = obtener_todas_sugerencias()
+    if not sugs:
+        await update.message.reply_text("No hay sugerencias registradas. 🐾")
+        return
+    
+    try:
+        buffer = generar_excel_sugerencias_bytes(sugs)
+        nombre = f"Sugerencias_Danna_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        await update.message.reply_document(
+            document=buffer,
+            filename=nombre,
+            caption=f"💡 Excel listo! {len(sugs)} sugerencias para aprender."
+        )
+    except Exception as e:
+        logger.error(f"Error Excel sugerencias: {e}")
+        await update.message.reply_text("Error al generar Excel.")
+
+async def responder_sugerencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text("Uso: /responder <ID> <mensaje>")
+        return
+    
+    sug_id = context.args[0]
+    respuesta = " ".join(context.args[1:])
+    
+    sug = obtener_sugerencia_por_id(sug_id)
+    if not sug:
+        await update.message.reply_text(f"❌ Sugerencia {sug_id} no encontrada.")
+        return
+        
+    ok = responder_sugerencia_db(sug_id, respuesta)
+    if ok:
+        await update.message.reply_text(f"✅ Respuesta guardada en BD. Intentando notificar al usuario...")
+        try:
+            telegram_id = sug["telegram_id"]
+            mensaje_usuario = (
+                f"🐕 *¡Guau! Mi creador ha leído tu sugerencia:*\n"
+                f"📝 _{sug['sugerencia']}_\n\n"
+                f"👨‍💻 *Respuesta de Nicolás:*\n"
+                f"{respuesta}\n\n"
+                f"¡Seguiré aprendiendo nuevas 'skills'! 🐾"
+            )
+            await context.bot.send_message(chat_id=telegram_id, text=mensaje_usuario, parse_mode="Markdown")
+            await update.message.reply_text(f"✅ Usuario notificado con éxito.")
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ No se pudo notificar al usuario (puede que me haya bloqueado): {e}")
+    else:
+        await update.message.reply_text("❌ Error al guardar respuesta en BD.")
+
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     conv = ConversationHandler(
@@ -415,14 +543,26 @@ def main():
         },
         fallbacks=[CommandHandler("cancelar", cancelar)]
     )
+    
+    conv_sugerencia = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^💡 Sugerencias y Ayuda$"), pedir_sugerencia)],
+        states={
+            ESPERANDO_SUGERENCIA: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_sugerencia)]
+        },
+        fallbacks=[CommandHandler("cancelar", cancelar)]
+    )
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("ayuda", ayuda))
     app.add_handler(CommandHandler("excel", exportar_excel))
     app.add_handler(CommandHandler("estado", cambiar_estado))
+    app.add_handler(CommandHandler("excel_sugerencias", excel_sugerencias))
+    app.add_handler(CommandHandler("responder", responder_sugerencia))
+    
     app.add_handler(conv)
+    app.add_handler(conv_sugerencia)
+    
     app.add_handler(MessageHandler(filters.Regex("^📊 Mis Solicitudes$"), mis_solicitudes))
     app.add_handler(MessageHandler(filters.Regex("^📥 Exportar Excel$"), exportar_excel))
-    app.add_handler(MessageHandler(filters.Regex("^❓ Ayuda$"), ayuda))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensaje_libre))
     logger.info("DANNA Bot activo con Excel desde Telegram!")
