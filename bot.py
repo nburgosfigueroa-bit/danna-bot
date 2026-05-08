@@ -1,14 +1,18 @@
 import os
 import logging
 import requests
+import io
 from dotenv import load_dotenv
 from datetime import datetime
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes, ConversationHandler
 )
 from groq import Groq
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 load_dotenv()
 
@@ -30,12 +34,20 @@ SUPABASE_HEADERS = {
 }
 
 def insertar_solicitud(solicitud):
-    url = f"{SUPABASE_URL}/rest/v1/solicitudes"
+    url = f"{SUPABASE_URL}/rest/v1/solicitudes?apikey={SUPABASE_KEY}"
     r = requests.post(url, json=solicitud, headers=SUPABASE_HEADERS)
     return r.status_code in [200, 201]
 
-def obtener_solicitudes(telegram_id):
-    url = f"{SUPABASE_URL}/rest/v1/solicitudes?telegram_id=eq.{telegram_id}&order=fecha_creacion.desc&limit=5"
+def obtener_solicitudes_usuario(telegram_id):
+    url = f"{SUPABASE_URL}/rest/v1/solicitudes?telegram_id=eq.{telegram_id}&order=fecha_creacion.desc&limit=5&apikey={SUPABASE_KEY}"
+    headers = {**SUPABASE_HEADERS, "Prefer": ""}
+    r = requests.get(url, headers=headers)
+    if r.status_code == 200:
+        return r.json()
+    return []
+
+def obtener_todas_ots():
+    url = f"{SUPABASE_URL}/rest/v1/solicitudes?order=fecha_creacion.desc&apikey={SUPABASE_KEY}"
     headers = {**SUPABASE_HEADERS, "Prefer": ""}
     r = requests.get(url, headers=headers)
     if r.status_code == 200:
@@ -43,12 +55,12 @@ def obtener_solicitudes(telegram_id):
     return []
 
 def guardar_mensaje(telegram_id, role, content):
-    url = f"{SUPABASE_URL}/rest/v1/memoria_conversaciones"
+    url = f"{SUPABASE_URL}/rest/v1/memoria_conversaciones?apikey={SUPABASE_KEY}"
     data = {"telegram_id": telegram_id, "role": role, "content": content}
     requests.post(url, json=data, headers=SUPABASE_HEADERS)
 
 def obtener_historial(telegram_id):
-    url = f"{SUPABASE_URL}/rest/v1/memoria_conversaciones?telegram_id=eq.{telegram_id}&order=fecha.desc&limit=10"
+    url = f"{SUPABASE_URL}/rest/v1/memoria_conversaciones?telegram_id=eq.{telegram_id}&order=fecha.desc&limit=10&apikey={SUPABASE_KEY}"
     headers = {**SUPABASE_HEADERS, "Prefer": ""}
     r = requests.get(url, headers=headers)
     if r.status_code == 200:
@@ -56,31 +68,99 @@ def obtener_historial(telegram_id):
         return list(reversed([{"role": m["role"], "content": m["content"]} for m in mensajes]))
     return []
 
-SYSTEM_PROMPT = """Eres DANNA 🐕, tu compañera asistente virtual que te ayuda a planificar tareas, gestionar tu trabajo y hacer tu día más fácil.
+def generar_excel_bytes(ots):
+    COLOR_HEADER     = "1B5E20"
+    COLOR_PENDIENTE  = "FFF9C4"
+    COLOR_EN_PROCESO = "BBDEFB"
+    COLOR_COMPLETADA = "C8E6C9"
+    ESTADO_COLORES = {
+        "pendiente":  COLOR_PENDIENTE,
+        "en_proceso": COLOR_EN_PROCESO,
+        "completada": COLOR_COMPLETADA,
+    }
 
-PERSONALIDAD:
-- Cada saludo es diferente y lleno de energía perruna
-- Respondes en UN solo mensaje corto y directo
-- Usas emojis perrunos 🐕🐾🦴🌿 ocasionalmente, sin exagerar
-- Eres cariñosa pero eficiente
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "OTs Zona 6"
 
-EXPERTISE:
-- Experta en áreas verdes, parques, plazas y jardines
-- Conoces contratos municipales, OTs, multas UTM, dotación de personal
-- Sabes de podas, riego, limpieza, juegos, infraestructura
-- Manejas hasta 228 trabajadores en Zona 6 (4 administrativos, 70 especializados, 158 jardineros)
-- Conoces los sectores y áreas verdes de Maipú
+    ws.merge_cells("A1:H1")
+    titulo = ws["A1"]
+    titulo.value = "DANNA - Ordenes de Trabajo Zona 6 Maipu"
+    titulo.font = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
+    titulo.fill = PatternFill("solid", fgColor=COLOR_HEADER)
+    titulo.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 30
 
-CAPACIDADES EXTRA:
-- Puedes consultar el clima de Santiago si te lo piden
-- Cuentas chistes cortos y divertidos cuando el trabajador necesita reírse
-- Das ánimo cuando alguien está cansado o estresado
-- Recuerdas conversaciones anteriores y las usas naturalmente
+    ws.merge_cells("A2:H2")
+    sub = ws["A2"]
+    sub.value = f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}  |  Total OTs: {len(ots)}"
+    sub.font = Font(name="Calibri", size=10, italic=True)
+    sub.alignment = Alignment(horizontal="center")
+    ws.row_dimensions[2].height = 18
 
-REGLAS:
-- Nunca escribas listas largas
-- Si no sabes algo, sugiere crear una OT
-- Siempre termina con energía positiva 🐾"""
+    columnas = ["N", "OT", "Trabajador", "Tipo de Trabajo", "Sector", "Descripcion", "Estado", "Fecha"]
+    anchos   = [5,   18,   20,           18,                15,       35,             12,       16]
+
+    for i, (col, ancho) in enumerate(zip(columnas, anchos), start=1):
+        c = ws.cell(row=3, column=i, value=col)
+        c.font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor=COLOR_HEADER)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[get_column_letter(i)].width = ancho
+    ws.row_dimensions[3].height = 22
+
+    for idx, ot in enumerate(ots, start=1):
+        fila = idx + 3
+        estado = ot.get("estado", "pendiente").lower()
+        color_fila = ESTADO_COLORES.get(estado, "FFFFFF")
+        fecha_raw = ot.get("fecha_creacion", "")
+        try:
+            fecha = datetime.fromisoformat(fecha_raw).strftime("%d/%m/%Y %H:%M")
+        except Exception:
+            fecha = fecha_raw[:16] if fecha_raw else ""
+
+        valores = [idx, ot.get("ot_numero",""), ot.get("nombre_usuario",""),
+                   ot.get("tipo_trabajo",""), ot.get("sector",""),
+                   ot.get("descripcion",""), ot.get("estado","").upper(), fecha]
+
+        for col, valor in enumerate(valores, start=1):
+            c = ws.cell(row=fila, column=col, value=valor)
+            c.fill = PatternFill("solid", fgColor=color_fila)
+            c.font = Font(name="Calibri", size=10)
+            c.alignment = Alignment(vertical="center", wrap_text=True)
+            c.border = Border(
+                bottom=Side(style="thin", color="DDDDDD"),
+                right=Side(style="thin", color="DDDDDD")
+            )
+        ws.row_dimensions[fila].height = 18
+
+    fila_res = len(ots) + 5
+    ws.merge_cells(f"A{fila_res}:H{fila_res}")
+    c = ws.cell(row=fila_res, column=1, value="RESUMEN")
+    c.font = Font(bold=True, size=11, color="FFFFFF")
+    c.fill = PatternFill("solid", fgColor=COLOR_HEADER)
+    c.alignment = Alignment(horizontal="center")
+
+    resumen = [
+        ("Total OTs", len(ots)),
+        ("Pendientes", sum(1 for o in ots if o.get("estado") == "pendiente")),
+        ("En Proceso", sum(1 for o in ots if o.get("estado") == "en_proceso")),
+        ("Completadas", sum(1 for o in ots if o.get("estado") == "completada")),
+    ]
+    for i, (label, valor) in enumerate(resumen):
+        r = fila_res + 1 + i
+        ws.cell(row=r, column=1, value=f"{label}: {valor}").font = Font(size=10, bold=True)
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+SYSTEM_PROMPT = """Eres DANNA, tu companera asistente virtual que te ayuda a planificar tareas, gestionar tu trabajo y hacer tu dia mas facil.
+PERSONALIDAD: Cada saludo es diferente y lleno de energia perruna. Respondes en UN solo mensaje corto y directo. Usas emojis perrunos ocasionalmente. Eres carinosa pero eficiente.
+EXPERTISE: Experta en areas verdes, parques, plazas y jardines. Conoces contratos municipales, OTs, multas UTM, dotacion de personal. Sabes de podas, riego, limpieza, juegos, infraestructura. Manejas hasta 228 trabajadores en Zona 6.
+CAPACIDADES EXTRA: Puedes contar el clima de Santiago si te lo piden. Cuentas chistes cortos y divertidos. Das animo cuando alguien esta cansado. Recuerdas conversaciones anteriores.
+REGLAS: Nunca escribas listas largas. Si no sabes algo, sugiere crear una OT. Siempre termina con energia positiva."""
 
 ESPERANDO_TIPO, ESPERANDO_SECTOR, ESPERANDO_DESCRIPCION, ESPERANDO_FOTO = range(4)
 
@@ -110,28 +190,47 @@ async def respuesta_ia(mensaje: str, telegram_id: str) -> str:
         return respuesta
     except Exception as e:
         logger.error(f"Error Groq: {e}")
-        return "¡Guau! 🐕 Tuve un problemita, intenta de nuevo."
+        return "Guau! Tuve un problemita, intenta de nuevo."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nombre = update.effective_user.first_name
     await update.message.reply_text(
-        f"🐾 *¡Guau guau, {nombre}!* 🌿\n\n"
-        f"¡Qué alegría verte por aquí! 🐕 ¿Cómo va tu día?\n\n"
-        f"Soy DANNA, lista para salir a jugar... digo, ¡a trabajar! 🦴\n"
-        f"¿En qué te puedo ayudar hoy? ¡Dime, dime! 🐾",
+        f"🐾 *Guau guau, {nombre}!* 🌿\n\n"
+        f"Que alegria verte por aqui! 🐕 Como va tu dia?\n\n"
+        f"Soy DANNA, lista para salir a jugar... digo, a trabajar! 🦴\n"
+        f"En que te puedo ayudar hoy? Dime, dime! 🐾",
         parse_mode="Markdown",
         reply_markup=MENU_PRINCIPAL
     )
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📖 *Cómo usar DANNA:*\n\n"
+        "📖 *Como usar DANNA:*\n\n"
         "1. Toca *Nueva Solicitud* para crear una OT\n"
-        "2. O simplemente *escríbeme* lo que necesitas 🐕\n\n"
-        "¡Pregúntame lo que quieras! 🌿",
+        "2. Toca *Exportar Excel* para descargar todas las OTs\n"
+        "3. O simplemente *escribeme* lo que necesitas 🐕\n\n"
+        "Preguntame lo que quieras! 🌿",
         parse_mode="Markdown",
         reply_markup=MENU_PRINCIPAL
     )
+
+async def exportar_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mensaje_espera = await update.message.reply_text("🐕 Preparando tu Excel... dame un segundo!")
+    ots = obtener_todas_ots()
+    if not ots:
+        await update.message.reply_text("No hay OTs registradas aun. 🐾", reply_markup=MENU_PRINCIPAL)
+        return
+    try:
+        buffer = generar_excel_bytes(ots)
+        nombre = f"OTs_Zona6_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        await update.message.reply_document(
+            document=buffer,
+            filename=nombre,
+            caption=f"✅ Excel listo! {len(ots)} OTs exportadas 🌿🐾\n¿Merezco una Scooby galleta? 🍪"
+        )
+    except Exception as e:
+        logger.error(f"Error Excel: {e}")
+        await update.message.reply_text("Error al generar Excel. Intenta de nuevo.", reply_markup=MENU_PRINCIPAL)
 
 async def nueva_solicitud(update: Update, context: ContextTypes.DEFAULT_TYPE):
     teclado = ReplyKeyboardMarkup(
@@ -139,7 +238,7 @@ async def nueva_solicitud(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resize_keyboard=True
     )
     await update.message.reply_text(
-        "🔧 *Nueva Solicitud*\n\n¿Qué tipo de trabajo es?",
+        "🔧 *Nueva Solicitud*\n\nQue tipo de trabajo es?",
         parse_mode="Markdown",
         reply_markup=teclado
     )
@@ -152,7 +251,7 @@ async def recibir_tipo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     context.user_data["tipo"] = tipo
     await update.message.reply_text(
-        f"✅ *{tipo}*\n\n📍 ¿En qué sector o área verde?",
+        f"✅ *{tipo}*\n\n📍 En que sector o area verde?",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardMarkup([["❌ Cancelar"]], resize_keyboard=True)
     )
@@ -178,7 +277,7 @@ async def recibir_descripcion(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
     context.user_data["descripcion"] = descripcion
     await update.message.reply_text(
-        "📸 ¿Tienes foto? Envíala ahora.\nSi no, escribe *sin foto*.",
+        "📸 Tienes foto? Enviala ahora.\nSi no, escribe *sin foto*.",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardMarkup([["Sin foto"], ["❌ Cancelar"]], resize_keyboard=True)
     )
@@ -217,12 +316,12 @@ async def finalizar_solicitud(update, context, foto_url):
     ok = insertar_solicitud(solicitud)
     if ok:
         await update.message.reply_text(
-            f"✅ *¡Solicitud registrada!* 🐕\n\n"
+            f"✅ *Solicitud registrada!* 🐕\n\n"
             f"🔢 `{ot_numero}`\n"
             f"🔧 {datos.get('tipo')}\n"
             f"📍 {datos.get('sector')}\n"
             f"📝 {datos.get('descripcion')}\n\n"
-            f"Estado: *PENDIENTE* 🟡\n\n¡Guau! Ya queda en el sistema 🐾",
+            f"Estado: *PENDIENTE* 🟡\n\nGuau! Ya queda en el sistema 🐾",
             parse_mode="Markdown",
             reply_markup=MENU_PRINCIPAL
         )
@@ -235,15 +334,18 @@ async def finalizar_solicitud(update, context, foto_url):
 
 async def mis_solicitudes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     usuario_id = str(update.effective_user.id)
-    solicitudes = obtener_solicitudes(usuario_id)
+    solicitudes = obtener_solicitudes_usuario(usuario_id)
     if not solicitudes:
-        await update.message.reply_text("No tienes solicitudes aún. 🐾", reply_markup=MENU_PRINCIPAL)
+        await update.message.reply_text("No tienes solicitudes aun. 🐾", reply_markup=MENU_PRINCIPAL)
         return
-    texto = "📋 *Tus últimas solicitudes:*\n\n"
+    texto = "📋 *Tus ultimas solicitudes:*\n\n"
     for s in solicitudes:
         fecha = s.get("fecha_creacion", "")[:10]
-        texto += f"🟡 `{s['ot_numero']}`\n   {s['tipo_trabajo']} · {s['sector']} · {fecha}\n\n"
-    await update.message.reply_text(texto, parse_mode="Markdown", reply_markup=MENU_PRINCIPAL)
+        estado = s.get("estado", "pendiente").upper()
+        texto += f"🟡 `{s['ot_numero']}` - *{estado}*\n   {s['tipo_trabajo']} · {s['sector']} · {fecha}\n\n"
+    
+    teclado_inline = InlineKeyboardMarkup([[InlineKeyboardButton("📥 Descargar Excel", callback_data="exportar_excel")]])
+    await update.message.reply_text(texto, parse_mode="Markdown", reply_markup=teclado_inline)
 
 async def mensaje_libre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
@@ -255,6 +357,45 @@ async def mensaje_libre(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Cancelado. 🐾", reply_markup=MENU_PRINCIPAL)
     return ConversationHandler.END
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "exportar_excel":
+        await query.message.reply_text("🐕 Preparando tu Excel... dame un segundo!")
+        ots = obtener_todas_ots()
+        if not ots:
+            await query.message.reply_text("No hay OTs registradas aun. 🐾")
+            return
+        try:
+            buffer = generar_excel_bytes(ots)
+            nombre = f"OTs_Zona6_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+            await query.message.reply_document(
+                document=buffer,
+                filename=nombre,
+                caption=f"✅ Excel listo! {len(ots)} OTs exportadas 🌿🐾\n¿Merezco una Scooby galleta? 🍪"
+            )
+        except Exception as e:
+            logger.error(f"Error Excel: {e}")
+            await query.message.reply_text("Error al generar Excel. Intenta de nuevo.")
+
+async def cambiar_estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text("Uso: /estado <OT> <estado>\nEjemplo: /estado OT-20260508-1120 en_proceso\n\nEstados: pendiente, en_proceso, completada", parse_mode="Markdown")
+        return
+    ot = context.args[0]
+    estado = context.args[1].lower()
+    if estado not in ["pendiente", "en_proceso", "completada"]:
+        await update.message.reply_text("Estado inválido. Usa: pendiente, en_proceso o completada.")
+        return
+    
+    url = f"{SUPABASE_URL}/rest/v1/solicitudes?ot_numero=eq.{ot}&apikey={SUPABASE_KEY}"
+    data = {"estado": estado}
+    r = requests.patch(url, json=data, headers=SUPABASE_HEADERS)
+    if r.status_code in [200, 204]:
+        await update.message.reply_text(f"✅ Estado de `{ot}` actualizado a *{estado}* 🐾", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"❌ Error al actualizar estado de `{ot}`", parse_mode="Markdown")
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -276,11 +417,15 @@ def main():
     )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ayuda", ayuda))
+    app.add_handler(CommandHandler("excel", exportar_excel))
+    app.add_handler(CommandHandler("estado", cambiar_estado))
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.Regex("^📊 Mis Solicitudes$"), mis_solicitudes))
+    app.add_handler(MessageHandler(filters.Regex("^📥 Exportar Excel$"), exportar_excel))
     app.add_handler(MessageHandler(filters.Regex("^❓ Ayuda$"), ayuda))
+    app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensaje_libre))
-    logger.info("🌿 DANNA Bot activo con memoria persistente en Supabase!")
+    logger.info("DANNA Bot activo con Excel desde Telegram!")
     app.run_polling()
 
 if __name__ == "__main__":
