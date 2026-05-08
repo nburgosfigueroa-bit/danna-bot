@@ -72,9 +72,9 @@ def autorizar_usuario_db(telegram_id):
     return r.status_code in [200, 204]
 
 def subir_a_supabase(file_path, file_name):
-    """Sube un archivo al bucket 'FOTOS DE DANNA' y devuelve la URL pública."""
+    """Sube un archivo al bucket 'fotos' y devuelve la URL pública."""
     try:
-        bucket_name = "FOTOS%20DE%20DANNA" # Nombre con espacio codificado
+        bucket_name = "fotos" 
         url = f"{SUPABASE_URL}/storage/v1/object/{bucket_name}/{file_name}"
         
         with open(file_path, "rb") as f:
@@ -633,13 +633,21 @@ async def finalizar_solicitud(update, context, foto_url):
     }
     ok = insertar_solicitud(solicitud)
     if ok:
-        await update.message.reply_text(
+        mensaje_exito = (
             f"✅ *Solicitud registrada!* 🐕\n\n"
             f"🔢 `{ot_numero}`\n"
             f"🔧 {datos.get('tipo')}\n"
             f"📍 {datos.get('sector')}\n"
             f"📝 {datos.get('descripcion')}\n\n"
-            f"Estado: *PENDIENTE* 🟡\n\nGuau! Ya queda en el sistema 🐾",
+            f"Estado: *PENDIENTE* 🟡\n\n"
+        )
+        if foto_url:
+            mensaje_exito += f"📸 *Evidencia:* [Ver Foto]({foto_url})\n\n"
+            
+        mensaje_exito += "Guau! Ya queda en el sistema 🐾"
+        
+        await update.message.reply_text(
+            mensaje_exito,
             parse_mode="Markdown",
             reply_markup=MENU_PRINCIPAL
         )
