@@ -310,7 +310,7 @@ CAPACIDADES EXTRA: Puedes contar el clima de Santiago si te lo piden. Cuentas ch
 REGLAS: Nunca escribas listas largas. Si no sabes algo, sugiere crear una OT. Siempre termina con energia positiva."""
 
 ESPERANDO_TIPO, ESPERANDO_SECTOR, ESPERANDO_DESCRIPCION, ESPERANDO_FOTO, ESPERANDO_SUGERENCIA = range(5)
-REG_NOMBRE, REG_CARGO, REG_RUT, REG_EMAIL = range(10, 14)
+REG_NOMBRE, REG_CARGO, REG_EMPRESA, REG_CONTRATO, REG_RUT, REG_EMAIL = range(10, 16)
 
 TIPOS_TRABAJO = [
     "🌳 Poda", "💧 Riego", "🗑️ Limpieza",
@@ -375,7 +375,17 @@ async def reg_nombre(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reg_cargo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["reg_cargo"] = update.message.text
-    await update.message.reply_text("Entendido. Ahora dime tu *RUT* (con guion y dígito verificador):", parse_mode="Markdown")
+    await update.message.reply_text("Entendido. ¿A qué *empresa* perteneces?", parse_mode="Markdown")
+    return REG_EMPRESA
+
+async def reg_empresa(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["reg_empresa"] = update.message.text
+    await update.message.reply_text("¿En qué *contrato* estás trabajando actualmente?", parse_mode="Markdown")
+    return REG_CONTRATO
+
+async def reg_contrato(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["reg_contrato"] = update.message.text
+    await update.message.reply_text("Ahora dime tu *RUT* (con guion y dígito verificador):", parse_mode="Markdown")
     return REG_RUT
 
 async def reg_rut(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -397,6 +407,8 @@ async def reg_finalizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "telegram_id": str(user.id),
         "nombre": datos["reg_nombre"],
         "cargo": datos["reg_cargo"],
+        "empresa": datos["reg_empresa"],
+        "contrato": datos["reg_contrato"],
         "rut": datos["reg_rut"],
         "email": email,
         "autorizado": False
@@ -415,6 +427,8 @@ async def reg_finalizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=f"🔔 *Nuevo Registro de Usuario*\n\n"
                  f"👤 Nombre: {datos['reg_nombre']}\n"
                  f"💼 Cargo: {datos['reg_cargo']}\n"
+                 f"🏢 Empresa: {datos['reg_empresa']}\n"
+                 f"📑 Contrato: {datos['reg_contrato']}\n"
                  f"🆔 RUT: {datos['reg_rut']}\n"
                  f"📧 Email: {email}\n"
                  f"ID: `{user.id}`\n\n¿Deseas autorizarlo?",
@@ -869,6 +883,8 @@ def main():
         states={
             REG_NOMBRE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_nombre)],
             REG_CARGO: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_cargo)],
+            REG_EMPRESA: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_empresa)],
+            REG_CONTRATO: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_contrato)],
             REG_RUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_rut)],
             REG_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_finalizar)],
         },
