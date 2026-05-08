@@ -909,7 +909,7 @@ def main():
             ESPERANDO_SECTOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_sector)],
             ESPERANDO_DESCRIPCION: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_descripcion)],
             ESPERANDO_FOTO: [
-                MessageHandler(filters.PHOTO, recibir_foto),
+                MessageHandler(filters.PHOTO, pedir_foto),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, sin_foto)
             ],
         },
